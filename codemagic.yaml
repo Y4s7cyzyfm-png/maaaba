@@ -1,0 +1,113 @@
+workflows:
+  maaaba-tipa:
+    name: Maaaba TIPA (arm64e)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      # Xcode 26.x for iOS 26 SDK / arm64e
+      xcode: latest
+      vars:
+        BUNDLE_ID: com.maaaba
+        APP_VERSION: 1.0.0
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: "*"
+          include: true
+          source: false
+    scripts:
+      - name: Build Maaaba (arm64e only, unsigned)
+        script: |
+          set -e
+          # Force arm64e single-arch (ARCHS=arm64e already set in the target config)
+          xcodebuild -project Maaaba.xcodeproj \
+            -scheme Maaaba \
+            -configuration Release \
+            -sdk iphoneos \
+            ARCHS=arm64e \
+            ONLY_ACTIVE_ARCH=YES \
+            VALID_ARCHS=arm64e \
+            MARKETING_VERSION=1.0.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            SYMROOT=build \
+            clean build
+      - name: Verify architecture (arm64e only)
+        script: |
+          set -e
+          APP="build/Release-iphoneos/Maaaba.app"
+          if [ ! -d "$APP" ]; then
+            APP=$(find build -name "Maaaba.app" -type d | head -1)
+          fi
+          echo "Using APP=$APP"
+          BIN="$APP/Maaaba"
+          echo "== main binary =="
+          lipo -info "$BIN"
+          if ! lipo -info "$BIN" | grep -q "arm64e"; then
+            echo "[!] arm64e not found"; exit 1
+          fi
+          if lipo -info "$BIN" | grep -q ","; then
+            echo "[!] unexpected multi-arch binary"; exit 1
+          fi
+      - name: Stage resources & fake-sign
+        script: |
+          set -e
+          brew install ldid || true
+          APP="build/Release-iphoneos/Maaaba.app"
+          if [ ! -d "$APP" ]; then
+            APP=$(find build -name "Maaaba.app" -type d | head -1)
+          fi
+          ENT="supports/entitlements-maaaba.plist"
+          echo "APP=$APP ENT=$ENT"
+
+          # 主二进制伪签
+          ldid -S"$ENT" "$APP/Maaaba"
+
+          # 嵌入的 dylib（libxpf / libgrabkernel2）也必须伪签：
+          # CODE_SIGNING_ALLOWED=NO 时 dylib 无签名，dyld 直接拒绝加载 → 启动闪退。
+          mkdir -p "$APP/Frameworks"
+          if [ -f Vendor/darksword-lib-thin/libxpf.dylib ]; then
+            cp -f Vendor/darksword-lib-thin/libxpf.dylib "$APP/Frameworks/"
+            cp -f Vendor/darksword-lib-thin/libgrabkernel2.dylib "$APP/Frameworks/"
+          else
+            cp -f Vendor/darksword-lib/libxpf.dylib "$APP/Frameworks/"
+            cp -f Vendor/darksword-lib/libgrabkernel2.dylib "$APP/Frameworks/"
+          fi
+          rm -f "$APP"/libxpf.dylib "$APP"/libgrabkernel2.dylib
+          find "$APP" -name '*.dylib' -not -path "$APP/Frameworks/*" | while read -r dylib; do
+            mv -f "$dylib" "$APP/Frameworks/$(basename "$dylib")"
+          done
+          for dylib in "$APP"/Frameworks/*.dylib; do
+            [ -e "$dylib" ] || continue
+            ldid -S"$ENT" "$dylib"
+          done
+          echo "== 签名后的 Frameworks =="
+          ls -l "$APP/Frameworks" || true
+          test -f "$APP/Frameworks/libxpf.dylib"
+          test -f "$APP/Frameworks/libgrabkernel2.dylib"
+          echo "[ok] libxpf / libgrabkernel2 staged & signed"
+      - name: Package .tipa / .ipa (Maaaba)
+        script: |
+          set -e
+          APP="build/Release-iphoneos/Maaaba.app"
+          if [ ! -d "$APP" ]; then
+            APP=$(find build -name "Maaaba.app" -type d | head -1)
+          fi
+          rm -rf Payload Maaaba.tipa Maaaba.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Maaaba.tipa Payload
+          # 同一产物再输出一份 .ipa（名字 Maaaba.ipa）
+          cp Maaaba.tipa Maaaba.ipa
+          echo "== tipa 内容 =="
+          unzip -l Maaaba.tipa | head -40
+          unzip -l Maaaba.tipa | grep -q "Frameworks/libxpf.dylib"
+          unzip -l Maaaba.tipa | grep -q "Frameworks/libgrabkernel2.dylib"
+          echo "[ok] Maaaba.tipa / Maaaba.ipa contain dylibs"
+    artifacts:
+      - Maaaba.tipa
+      - Maaaba.ipa
