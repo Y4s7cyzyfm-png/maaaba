@@ -526,7 +526,7 @@ static bool sf_apply_zoom(float multiplier) {
     }
     SF_LOG("第 2 轮：邻近 %u 标记过滤后剩 %lu 处", kZoomNearbyMark, (unsigned long)secondPass.count);
     if (secondPass.count == 0) {
-        sf_fail(@"邻近标记 %u 未命中——标记值或窗口大小随版本变化", kZoomNearbyMark);
+        sf_fail([NSString stringWithFormat:@"邻近标记 %u 未命中——标记值或窗口大小随版本变化", kZoomNearbyMark]);
         return false;
     }
 
